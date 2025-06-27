@@ -7,6 +7,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 import matplotlib.pyplot as plt
 from concurrent.futures import ProcessPoolExecutor
 import warnings
+import time
 warnings.filterwarnings('ignore')
 
 def calculate_recent_payments(df_readings, df_payments):
@@ -39,14 +40,14 @@ def prepare_consumer_data_with_regressors(df_readings, consumer_id):
     consumer_data = consumer_data.dropna(subset=['consumption'])
     if len(consumer_data) == 0:
         return None
-    prophet_data = consumer_data[['reading_date', 'consumption', 'balance_in', 'balance_out', 'recent_payments']].copy()
-    prophet_data.columns = ['ds', 'y', 'balance_in', 'balance_out', 'recent_payments']
+    prophet_data = consumer_data[['reading_date', 'consumption', 'recent_payments']].copy()
+    prophet_data.columns = ['ds', 'y', 'recent_payments']
     prophet_data = prophet_data[prophet_data['y'] >= 0]
     # Drop rows with NaNs in regressors
-    prophet_data = prophet_data.dropna(subset=['balance_in', 'balance_out', 'recent_payments'])
+    prophet_data = prophet_data.dropna(subset=['recent_payments'])
     return prophet_data
 
-def fit_and_forecast_prophet(prophet_data, periods=30):
+def fit_and_forecast_prophet(prophet_data, periods=0):
     try:
         model = Prophet(
             yearly_seasonality=True,
@@ -54,13 +55,12 @@ def fit_and_forecast_prophet(prophet_data, periods=30):
             daily_seasonality=False,
             seasonality_mode='multiplicative'
         )
-        model.add_regressor('balance_in')
-        model.add_regressor('balance_out')
+
         model.add_regressor('recent_payments')
         model.fit(prophet_data)
         # Make future predictions
-        future = model.make_future_dataframe(periods=periods)
-        for reg in ['balance_in', 'balance_out', 'recent_payments']:
+        future = model.make_future_dataframe(periods=300)
+        for reg in ['recent_payments']:
             last_val = prophet_data[reg].iloc[-1]
             future[reg] = last_val
         forecast = model.predict(future)
@@ -76,7 +76,11 @@ def fit_and_forecast_prophet(prophet_data, periods=30):
                 predicted = predicted[:min_len]
                 metrics['rmse'] = np.sqrt(mean_squared_error(actual, predicted))
                 metrics['mae'] = mean_absolute_error(actual, predicted)
-                metrics['mape'] = np.mean(np.abs((actual - predicted) / actual)) * 100
+                # nonzero_actual = actual != 0
+                # if np.any(nonzero_actual):
+                #     metrics['mape'] = np.mean(np.abs((actual[nonzero_actual] - predicted[nonzero_actual]) / actual[nonzero_actual])) * 100
+                # else:
+                #     metrics['mape'] = np.nan
         return {
             'model': model,
             'forecast': forecast,
@@ -113,76 +117,53 @@ def process_single_consumer(args):
     }
 
 def main():
+    start_time = time.time()
     print("Starting Prophet Time Series Forecasting for Utility Consumption")
     print("=" * 60)
+
     # 1. Read and merge all reading files
     print("Step 1: Loading and merging reading data...")
     reading_files = glob.glob("*reading*.csv")
     print(f"Found {len(reading_files)} reading files: {reading_files}")
     df_readings = pd.concat([pd.read_csv(f) for f in reading_files], ignore_index=True)
     df_readings['reading_date'] = pd.to_datetime(df_readings['reading_date'])
-    # 2. Merge all balance files
-    balance_files = glob.glob("*balance*.csv")
-    df_balances = pd.concat([pd.read_csv(f) for f in balance_files], ignore_index=True)
-    df_balances['period'] = pd.to_datetime(df_balances['period'])
+
+     # Find duplicate rows (excluding the first occurrence)
+    # duplicates = df_readings.duplicated(subset=['consumer_id', 'reading_date'], keep=False)
+
+    # Show all duplicates
+    # duplicate_rows = df_readings[duplicates]
+    # print(f"Number of duplicate (consumer_id, reading_date) pairs: {duplicate_rows.shape[0]}")
+    # print(duplicate_rows)
+  
     # Sort and remove duplicates
     df_readings = df_readings.drop_duplicates(subset=['consumer_id', 'reading_date'])
-    df_balances = df_balances.drop_duplicates(subset=['consumer_id', 'period'])
     df_readings = df_readings.dropna(subset=['reading_date'])
-    df_balances = df_balances.dropna(subset=['period'])
     df_readings = df_readings.sort_values(['consumer_id', 'reading_date']).reset_index(drop=True)
-    df_balances = df_balances.sort_values(['consumer_id', 'period']).reset_index(drop=True)
+    print(f"Total readings: {len(df_readings)}")
+    print(f"Unique consumers: {df_readings['consumer_id'].nunique()}")
 
-    for cid, group in df_readings.groupby('consumer_id'):
-        if not group['reading_date'].is_monotonic_increasing:
-            print(f"Not sorted for consumer_id {cid}")
-    # 3. Merge most recent balance info
-    print("df_readings:")
-    print(df_readings[['consumer_id', 'reading_date']].head(20))
-    print(df_readings[['consumer_id', 'reading_date']].tail(20))
-    print(df_readings[['consumer_id', 'reading_date']].sample(20))
-    print("df_balances:")
-    print(df_balances[['consumer_id', 'period']].head(20))
-    print("Duplicates in df_readings:", df_readings.duplicated(subset=['consumer_id', 'reading_date']).sum())
-    print("Duplicates in df_balances:", df_balances.duplicated(subset=['consumer_id', 'period']).sum())
-    cid = df_readings['consumer_id'].iloc[0]
-    df_readings_cid = df_readings[df_readings['consumer_id'] == cid].sort_values('reading_date').reset_index(drop=True)
-    df_balances_cid = df_balances[df_balances['consumer_id'] == cid].sort_values('period').reset_index(drop=True)
+    # for cid, group in df_readings.groupby('consumer_id'):
+    #     if not group['reading_date'].is_monotonic_increasing:
+    #         print(f"Not sorted for consumer_id {cid}")
 
-    print(df_readings_cid)
-    print(df_balances_cid)
-
-    df_readings = pd.merge_asof(
-        df_readings_cid,
-        df_balances_cid,
-        by='consumer_id',
-        left_on='reading_date',
-        right_on='period',
-        direction='backward'
-    )
-
-    # df_readings = df_readings.drop(columns=['period'])
-
-    missing_in_balances = set(df_readings['consumer_id']) - set(df_balances['consumer_id'])
-    print(f"Consumers in readings but not in balances: {len(missing_in_balances)}")
-    
-    print("Columns after merge:", df_readings.columns)
-    print(df_readings[['consumer_id', 'reading_date', 'period', 'balance_in', 'balance_out']].head(30))
-    print(df_readings.isnull().sum())
-    # 4. Read payments and calculate recent payments
+    # 3. Read payments and calculate recent payments
     df_payments = pd.read_csv("confirmed_payment.csv")
     df_payments['payment_date'] = pd.to_datetime(df_payments['payment_date'])
+    
+    first_100_consumers = df_readings['consumer_id'].drop_duplicates().head(10)
+    df_readings = df_readings[df_readings['consumer_id'].isin(first_100_consumers)]
     df_readings = calculate_recent_payments(df_readings, df_payments)
-    print(f"Total readings loaded: {len(df_readings):,}")
     print(f"Date range: {df_readings['reading_date'].min()} to {df_readings['reading_date'].max()}")
     print(f"Unique consumers: {df_readings['consumer_id'].nunique():,}")
+
     # 5. Get list of consumers with sufficient data
     print("\nStep 2: Identifying consumers with sufficient data...")
     consumer_counts = df_readings.groupby('consumer_id').size()
     consumers_with_data = consumer_counts[consumer_counts >= 5].index.tolist()
     print(f"Consumers with 5+ readings: {len(consumers_with_data):,}")
     # For testing, use a subset of consumers
-    test_consumers = consumers_with_data[:100]  # Start with 100 consumers
+    test_consumers = consumers_with_data  # Start with 100 consumers
     print(f"Testing with first {len(test_consumers)} consumers")
     # 6. Process consumers (with parallel processing)
     print("\nStep 3: Fitting Prophet models and forecasting...")
@@ -191,8 +172,8 @@ def main():
     with ProcessPoolExecutor() as executor:
         for i, result in enumerate(executor.map(process_single_consumer, args_list)):
             results.append(result)
-            if (i + 1) % 10 == 0:
-                print(f"Processed {i + 1}/{len(test_consumers)} consumers")
+            # if (i + 1) % 10 == 0:
+                # print(f"Processed {i + 1}/{len(test_consumers)} consumers")
     # 7. Analyze results
     print("\nStep 4: Analyzing results...")
     successful_results = [r for r in results if r['status'] == 'success']
@@ -202,12 +183,19 @@ def main():
     if successful_results:
         rmse_values = [r['metrics'].get('rmse', np.nan) for r in successful_results if 'rmse' in r['metrics']]
         mae_values = [r['metrics'].get('mae', np.nan) for r in successful_results if 'mae' in r['metrics']]
-        mape_values = [r['metrics'].get('mape', np.nan) for r in successful_results if 'mape' in r['metrics']]
+        # mape_values = [r['metrics'].get('mape', np.nan) for r in successful_results if 'mape' in r['metrics']]
         print(f"\nAverage RMSE: {np.nanmean(rmse_values):.2f}")
         print(f"Average MAE: {np.nanmean(mae_values):.2f}")
-        print(f"Average MAPE: {np.nanmean(mape_values):.2f}%")
+        # print(f"Average MAPE: {np.nanmean(mape_values):.2f}%")
         # 8. Visualize results for a few consumers
         print("\nStep 5: Creating visualizations...")
+
+        # df_readings['reading'].hist(bins=50)
+        # plt.xlabel('Consumption')
+        # plt.ylabel('Frequency')
+        # plt.title('Distribution of Consumption Values')
+        # plt.show()
+
         fig, axes = plt.subplots(5, 1, figsize=(12, 15))
         for i, result in enumerate(successful_results[:5]):
             consumer_id = result['consumer_id']
@@ -223,6 +211,9 @@ def main():
             ax.set_title(f'Consumer {consumer_id}: Consumption Forecast')
             ax.set_xlabel('Date')
             ax.set_ylabel('Consumption')
+            # ymin = df_readings['reading'].min()
+            # ymax = df_readings['reading'].max()
+            # ax.set_ylim(ymin * 0.95, ymax * 1.05)
             ax.legend()
             ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -237,7 +228,7 @@ def main():
                 'data_points': r['data_points'],
                 'rmse': r['metrics'].get('rmse', np.nan),
                 'mae': r['metrics'].get('mae', np.nan),
-                'mape': r['metrics'].get('mape', np.nan)
+                # 'mape': r['metrics'].get('mape', np.nan)
             }
             for r in results
         ])
@@ -256,6 +247,14 @@ def main():
     print("=" * 60)
 
     # Check sort per group
+
+    print(f"Total runtime: {time.time() - start_time:.2f} seconds")
+
+    print("Mean consumption:", df_readings['reading'].mean())
+    print("Median consumption:", df_readings['reading'].median())
+    print("Max consumption:", df_readings['reading'].max())
+    print("Min consumption:", df_readings['reading'].min())
+    print(forecast['ds'].tail(10))
 
 if __name__ == "__main__":
     main() 
