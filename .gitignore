@@ -1,2 +1,14 @@
-*.csv
+# Ignore virtual environments
 .venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Ignore CSV input & output files
+*.csv
+
+# Ignore output visualization
+prophet_forecasts.png
+
+.DS_Store
