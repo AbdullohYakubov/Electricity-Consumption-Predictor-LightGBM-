@@ -1,3 +1,6 @@
+# Ignore macOS system files
+.DS_Store
+
 # Ignore virtual environments
 .venv/
 
@@ -8,7 +11,8 @@ __pycache__/
 # Ignore CSV input & output files
 *.csv
 
-# Ignore output visualization
-prophet_forecasts.png
-
-.DS_Store
+# Ignore all images and output visualizations
+*.png
+*.jpg
+*.jpeg
+*.svg
