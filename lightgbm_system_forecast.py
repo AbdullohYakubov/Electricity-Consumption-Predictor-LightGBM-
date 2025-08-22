@@ -77,9 +77,9 @@ def remove_iqr_outliers(df, group_col='group', value_col='consumption'):
 
     return df.groupby(group_col, group_keys=False).apply(iqr_filter).reset_index(drop=True)
 
-def prepare_system_data(df_readings, df_temperature, df_recent_payments):
+def prepare_system_wide_data(df_readings, df_temperature, df_recent_payments):
     """
-    Prepare system-wide aggregated data with features for LightGBM
+    Prepare system-wide aggregated data with features for LightGBM (average consumption)
     """
     print("Preparing system-wide aggregated data...")
     
@@ -136,8 +136,70 @@ def prepare_system_data(df_readings, df_temperature, df_recent_payments):
     print(f"System data shape: {daily_consumption.shape}")
     print(f"Date range: {daily_consumption['ds'].min()} to {daily_consumption['ds'].max()}")
     print(f"Consumption range: {daily_consumption['y'].min():.2f} to {daily_consumption['y'].max():.2f}")
-
+        
     print(daily_consumption.columns.tolist())
+
+    return daily_consumption
+
+def prepare_consumer_specific_data(df_readings, df_temperature, df_recent_payments):
+    """
+    Prepare consumer-specific data with features for LightGBM (individual consumption)
+    """
+    print("Preparing consumer-specific data...")
+    
+    # Use the individual rows
+    daily_consumption = df_readings.copy()
+    daily_consumption['ds'] = daily_consumption['reading_date']
+    daily_consumption['y'] = daily_consumption['consumption']
+    
+    # Merge temperature data (shared)
+    if df_temperature is not None:
+        daily_consumption = daily_consumption.merge(df_temperature, left_on='ds', right_on='reading_date', how='left')
+        if 'tavg' in daily_consumption.columns:
+            daily_consumption = daily_consumption.rename(columns={'tavg': 'avg_temp'})
+        daily_consumption['avg_temp'] = daily_consumption['avg_temp'].fillna(daily_consumption['avg_temp'].median())
+    else:
+        daily_consumption['avg_temp'] = 20.0
+    
+    # Merge recent payments (per consumer)
+    if df_recent_payments is not None:
+        daily_consumption = daily_consumption.merge(df_recent_payments, on=['consumer_id', 'reading_date'], how='left')
+        daily_consumption['recent_payments'] = daily_consumption['recent_payments'].fillna(0.0)
+    else:
+        daily_consumption['recent_payments'] = 0.0
+    
+    # Add time-based features
+    daily_consumption['year'] = daily_consumption['ds'].dt.year
+    daily_consumption['month'] = daily_consumption['ds'].dt.month
+    daily_consumption['day_of_week'] = daily_consumption['ds'].dt.dayofweek
+    daily_consumption['day_of_year'] = daily_consumption['ds'].dt.dayofyear
+    daily_consumption['week_of_year'] = daily_consumption['ds'].dt.isocalendar().week
+    
+    # Add rolling features per consumer
+    daily_consumption = daily_consumption.sort_values(['consumer_id', 'ds'])
+    daily_consumption['rolling_mean_7'] = daily_consumption.groupby('consumer_id')['y'].rolling(window=7, min_periods=1).mean().reset_index(0, drop=True)
+    daily_consumption['rolling_mean_14'] = daily_consumption.groupby('consumer_id')['y'].rolling(window=14, min_periods=1).mean().reset_index(0, drop=True)
+    daily_consumption['rolling_mean_30'] = daily_consumption.groupby('consumer_id')['y'].rolling(window=30, min_periods=1).mean().reset_index(0, drop=True)
+    
+    # Shift rolling means to avoid look-ahead bias
+    daily_consumption['rolling_mean_7'] = daily_consumption.groupby('consumer_id')['rolling_mean_7'].shift(1)
+    daily_consumption['rolling_mean_14'] = daily_consumption.groupby('consumer_id')['rolling_mean_14'].shift(1)
+    daily_consumption['rolling_mean_30'] = daily_consumption.groupby('consumer_id')['rolling_mean_30'].shift(1)
+    
+    # Fill NaN values
+    daily_consumption['rolling_mean_7'] = daily_consumption['rolling_mean_7'].fillna(daily_consumption['y'])
+    daily_consumption['rolling_mean_14'] = daily_consumption['rolling_mean_14'].fillna(daily_consumption['y'])
+    daily_consumption['rolling_mean_30'] = daily_consumption['rolling_mean_30'].fillna(daily_consumption['y'])
+    
+    # Remove rows with NaN in target
+    daily_consumption = daily_consumption.dropna(subset=['y'])
+    
+    # Ensure positive consumption
+    daily_consumption = daily_consumption[daily_consumption['y'] >= 0]
+    
+    print(f"Consumer-specific data shape: {daily_consumption.shape}")
+    print(f"Date range: {daily_consumption['ds'].min()} to {daily_consumption['ds'].max()}")
+    print(f"Consumption range: {daily_consumption['y'].min():.2f} to {daily_consumption['y'].max():.2f}")
     
     return daily_consumption
 
@@ -151,9 +213,15 @@ def train_lightgbm_model(data, test_size=0.2):
     feature_cols = ['avg_temp', 'recent_payments', 'year', 'month', 'day_of_week', 
                    'day_of_year', 'week_of_year', 'rolling_mean_7', 'rolling_mean_14', 'rolling_mean_30']
     
+    if 'consumer_id' in data.columns:
+        feature_cols.append('consumer_id')
+    
     # Filter available features
     available_features = [col for col in feature_cols if col in data.columns]
     print(f"Using features: {available_features}")
+    
+    # Determine categorical features
+    categorical_feature = ['consumer_id'] if 'consumer_id' in available_features else None
     
     # Split data
     split_idx = int(len(data) * (1 - test_size))
@@ -182,8 +250,8 @@ def train_lightgbm_model(data, test_size=0.2):
     }
     
     # Create datasets
-    train_dataset = lgb.Dataset(X_train, label=y_train)
-    test_dataset = lgb.Dataset(X_test, label=y_test, reference=train_dataset)
+    train_dataset = lgb.Dataset(X_train, label=y_train, categorical_feature=categorical_feature)
+    test_dataset = lgb.Dataset(X_test, label=y_test, reference=train_dataset, categorical_feature=categorical_feature)
     
     # Train model
     model = lgb.train(
@@ -207,11 +275,11 @@ def train_lightgbm_model(data, test_size=0.2):
     
     return model, available_features, rmse, mae
 
-def forecast_future(model, data, features, periods=100):
+def forecast_system_future(model, data, features, periods=100):
     """
-    Forecast future consumption
+    Forecast future average consumption (system-wide)
     """
-    print(f"Forecasting next {periods} days...")
+    print(f"Forecasting next {periods} days (system-wide)...")
     
     # Get last date and create future dates
     last_date = data['ds'].max()
@@ -242,6 +310,44 @@ def forecast_future(model, data, features, periods=100):
         'ds': future_dates,
         'yhat': future_predictions
     })
+    
+    return forecast_df
+
+def forecast_consumer_future(model, data, features, periods=100):
+    """
+    Forecast future consumption for each consumer
+    """
+    print(f"Forecasting next {periods} days (consumer-specific)...")
+    
+    # Get unique consumers and last date
+    unique_consumers = data['consumer_id'].unique()
+    last_date = data['ds'].max()
+    future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=periods, freq='D')
+    
+    # Create future dataframe with cross product
+    future_data = pd.DataFrame(index=pd.MultiIndex.from_product([unique_consumers, future_dates], names=['consumer_id', 'ds'])).reset_index()
+    
+    # Add time features
+    future_data['year'] = future_data['ds'].dt.year
+    future_data['month'] = future_data['ds'].dt.month
+    future_data['day_of_week'] = future_data['ds'].dt.dayofweek
+    future_data['day_of_year'] = future_data['ds'].dt.dayofyear
+    future_data['week_of_year'] = future_data['ds'].dt.isocalendar().week
+    
+    # Get last known values per consumer for non-time features
+    non_time_features = [f for f in features if f not in ['year', 'month', 'day_of_week', 'day_of_year', 'week_of_year', 'consumer_id']]
+    last_rows = data.groupby('consumer_id')[non_time_features].last().reset_index()
+    
+    # Merge last values
+    future_data = future_data.merge(last_rows, on='consumer_id', how='left')
+    
+    # Make predictions
+    X_future = future_data[features]
+    future_predictions = model.predict(X_future)
+    
+    # Create forecast dataframe
+    forecast_df = future_data[['consumer_id', 'ds']].copy()
+    forecast_df['yhat'] = future_predictions
     
     return forecast_df
 
@@ -302,7 +408,7 @@ def main():
     temp_df = temp_df[temp_df['consumption'] >= 0]
     print(f"After removing negative consumption: {len(temp_df)} rows")
 
-    # 5. Clustering consumers (optional - for data quality)
+    # 5. Clustering consumers for data quality...
     print("Step 5: Clustering consumers for data quality...")
     user_mean = temp_df.groupby('consumer_id')['consumption'].mean()
     user_mean = user_mean[user_mean > 0]
@@ -333,31 +439,46 @@ def main():
     print("Step 6: Removing group-wise outliers using IQR...")
     temp_df = remove_iqr_outliers(temp_df, group_col='group', value_col='consumption')
 
-    # 7. Prepare system-wide data
-    print("Step 7: Preparing system-wide aggregated data...")
-    system_data = prepare_system_data(temp_df, df_temperature, df_recent_payments)
+    # 7. Prepare system-wide and consumer-specific data
+    print("Step 7: Preparing aggregated system-wide data...")
+    system_wide_data = prepare_system_wide_data(temp_df, df_temperature, df_recent_payments)
+    
+    print("Step 7: Preparing consumer-specific data...")
+    consumer_specific_data = prepare_consumer_specific_data(temp_df, df_temperature, df_recent_payments)
 
-    # 8. Train LightGBM model
-    print("Step 8: Training LightGBM model...")
-    model, features, rmse, mae = train_lightgbm_model(system_data, test_size=0.2)
+    # 8. Train LightGBM models
+    print("Step 8: Training system-wide LightGBM model...")
+    system_model, system_features, system_rmse, system_mae = train_lightgbm_model(system_wide_data, test_size=0.2)
+    
+    print("Step 8: Training consumer-specific LightGBM model...")
+    consumer_model, consumer_features, consumer_rmse, consumer_mae = train_lightgbm_model(consumer_specific_data, test_size=0.2)
 
     # 9. Forecast future
-    print("Step 9: Forecasting future consumption...")
-    forecast_df = forecast_future(model, system_data, features, periods=100)
+    print("Step 9: Forecasting future consumption (system-wide)...")
+    system_forecast_df = forecast_system_future(system_model, system_wide_data, system_features, periods=100)
+    
+    print("Step 9: Forecasting future consumption (consumer-specific)...")
+    consumer_forecast_df = forecast_consumer_future(consumer_model, consumer_specific_data, consumer_features, periods=100)
 
-    # 10. Create visualization
+    # Compute average from consumer-specific forecast for comparison
+    consumer_avg_forecast = consumer_forecast_df.groupby('ds')['yhat'].mean().reset_index(name='yhat_avg')
+
+    # 10. Create visualization (for system-wide)
     print("Step 10: Creating visualization...")
     plt.figure(figsize=(15, 8))
     
     # Plot historical data
-    plt.plot(system_data['ds'], system_data['y'], 'b.', alpha=0.6, label='Historical', markersize=2)
+    plt.plot(system_wide_data['ds'], system_wide_data['y'], 'b.', alpha=0.6, label='Historical Average', markersize=2)
     
-    # Plot forecast
-    plt.plot(forecast_df['ds'], forecast_df['yhat'], 'r-', linewidth=2, label='Forecast')
+    # Plot system-wide forecast
+    plt.plot(system_forecast_df['ds'], system_forecast_df['yhat'], 'r-', linewidth=2, label='System-Wide Forecast')
     
-    plt.title('System-Wide Consumption Forecast (LightGBM)', fontsize=16)
+    # Plot average from consumer-specific
+    plt.plot(consumer_avg_forecast['ds'], consumer_avg_forecast['yhat_avg'], 'g--', linewidth=2, label='Consumer-Specific Avg Forecast')
+    
+    plt.title('System-Wide Average Consumption Forecast (LightGBM)', fontsize=16)
     plt.xlabel('Date', fontsize=12)
-    plt.ylabel('Total Daily Consumption (kWh)', fontsize=12)
+    plt.ylabel('Average Daily Consumption (kWh)', fontsize=12)
     plt.legend(fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.xticks(rotation=45)
@@ -369,30 +490,55 @@ def main():
     # 11. Save results
     print("Step 11: Saving results...")
     
-    # Save forecast
-    forecast_df.to_csv('lightgbm_system_forecast.csv', index=False)
-    print("Forecast saved as 'lightgbm_system_forecast.csv'")
+    # Save system-wide forecast
+    system_forecast_df.to_csv('lightgbm_system_forecast.csv', index=False)
+    print("System-wide forecast saved as 'lightgbm_system_forecast.csv'")
     
-    # Save model info
+    # Save consumer-specific forecast
+    consumer_forecast_df.to_csv('lightgbm_consumer_forecast.csv', index=False)
+    print("Consumer-specific forecast saved as 'lightgbm_consumer_forecast.csv'")
+    
+    # Save average from consumer-specific
+    consumer_avg_forecast.to_csv('lightgbm_consumer_avg_forecast.csv', index=False)
+    print("Consumer-specific average forecast saved as 'lightgbm_consumer_avg_forecast.csv'")
+    
+    # Save model info (system-wide)
     model_info = {
-        'rmse': rmse,
-        'mae': mae,
-        'mae_median_ratio': (mae/system_data['y'].median())*100,
-        'features_used': features,
-        'data_points': len(system_data),
-        'date_range': f"{system_data['ds'].min()} to {system_data['ds'].max()}"
+        'rmse': system_rmse,
+        'mae': system_mae,
+        'mae_median_ratio': (system_mae/system_wide_data['y'].median())*100,
+        'features_used': system_features,
+        'data_points': len(system_wide_data),
+        'date_range': f"{system_wide_data['ds'].min()} to {system_wide_data['ds'].max()}"
     }
     
     model_info_df = pd.DataFrame([model_info])
     model_info_df.to_csv('lightgbm_system_model_info.csv', index=False)
-    print("Model info saved as 'lightgbm_system_model_info.csv'")
+    print("System-wide model info saved as 'lightgbm_system_model_info.csv'")
+    
+    # Save model info (consumer-specific)
+    consumer_model_info = {
+        'rmse': consumer_rmse,
+        'mae': consumer_mae,
+        'mae_median_ratio': (consumer_mae/consumer_specific_data['y'].median())*100,
+        'features_used': consumer_features,
+        'data_points': len(consumer_specific_data),
+        'date_range': f"{consumer_specific_data['ds'].min()} to {consumer_specific_data['ds'].max()}"
+    }
+    
+    consumer_model_info_df = pd.DataFrame([consumer_model_info])
+    consumer_model_info_df.to_csv('lightgbm_consumer_model_info.csv', index=False)
+    print("Consumer-specific model info saved as 'lightgbm_consumer_model_info.csv'")
 
     print("\nLightGBM System-Wide Forecasting completed!")
     print("=" * 60)
     print(f"Total runtime: {time.time() - start_time:.2f} seconds")
-    print(f"Final RMSE: {rmse:.2f}")
-    print(f"Final MAE: {mae:.2f}")
-    print(f"MAE/Median ratio: {(mae/system_data['y'].median())*100:.1f}%")
+    print(f"System-wide Final RMSE: {system_rmse:.2f}")
+    print(f"System-wide Final MAE: {system_mae:.2f}")
+    print(f"System-wide MAE/Median ratio: {(system_mae/system_wide_data['y'].median())*100:.1f}%")
+    print(f"Consumer-specific Final RMSE: {consumer_rmse:.2f}")
+    print(f"Consumer-specific Final MAE: {consumer_mae:.2f}")
+    print(f"Consumer-specific MAE/Median ratio: {(consumer_mae/consumer_specific_data['y'].median())*100:.1f}%")
 
 if __name__ == "__main__":
-    main() 
+    main()
