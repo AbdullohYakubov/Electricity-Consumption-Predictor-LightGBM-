@@ -98,8 +98,10 @@ def prepare_system_wide_data(df_readings, df_temperature, df_recent_payments):
     
     # Merge recent payments (system-wide average)
     if df_recent_payments is not None:
-        daily_payments = df_recent_payments.groupby('reading_date')['recent_payments'].mean().reset_index()
-        daily_consumption = daily_consumption.merge(daily_payments, left_on='ds', right_on='reading_date', how='left')
+        # Rename reading_date to ds for consistency
+        df_recent_payments = df_recent_payments.rename(columns={'reading_date': 'ds'})
+        daily_payments = df_recent_payments.groupby('ds')['recent_payments'].mean().reset_index()
+        daily_consumption = daily_consumption.merge(daily_payments, on='ds', how='left')
         daily_consumption['recent_payments'] = daily_consumption['recent_payments'].fillna(0.0)
     else:
         daily_consumption['recent_payments'] = 0.0
@@ -136,9 +138,7 @@ def prepare_system_wide_data(df_readings, df_temperature, df_recent_payments):
     print(f"System data shape: {daily_consumption.shape}")
     print(f"Date range: {daily_consumption['ds'].min()} to {daily_consumption['ds'].max()}")
     print(f"Consumption range: {daily_consumption['y'].min():.2f} to {daily_consumption['y'].max():.2f}")
-        
-    print(daily_consumption.columns.tolist())
-
+    
     return daily_consumption
 
 def prepare_consumer_specific_data(df_readings, df_temperature, df_recent_payments):
@@ -163,7 +163,10 @@ def prepare_consumer_specific_data(df_readings, df_temperature, df_recent_paymen
     
     # Merge recent payments (per consumer)
     if df_recent_payments is not None:
-        daily_consumption = daily_consumption.merge(df_recent_payments, on=['consumer_id', 'reading_date'], how='left')
+        # Rename reading_date to ds for consistency
+        df_recent_payments = df_recent_payments.rename(columns={'reading_date': 'ds'})
+        print(f"Columns in df_recent_payments after rename: {df_recent_payments.columns}")
+        daily_consumption = daily_consumption.merge(df_recent_payments, on=['consumer_id', 'ds'], how='left')
         daily_consumption['recent_payments'] = daily_consumption['recent_payments'].fillna(0.0)
     else:
         daily_consumption['recent_payments'] = 0.0
@@ -530,7 +533,7 @@ def main():
     consumer_model_info_df.to_csv('lightgbm_consumer_model_info.csv', index=False)
     print("Consumer-specific model info saved as 'lightgbm_consumer_model_info.csv'")
 
-    print("\nLightGBM System-Wide Forecasting completed!")
+    print("\nLightGBM System-Wide and Consumer-Specific Forecasting completed!")
     print("=" * 60)
     print(f"Total runtime: {time.time() - start_time:.2f} seconds")
     print(f"System-wide Final RMSE: {system_rmse:.2f}")
