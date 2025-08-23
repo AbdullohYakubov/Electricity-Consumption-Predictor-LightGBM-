@@ -10,6 +10,7 @@ __pycache__/
 
 # Ignore CSV input & output files
 *.csv
+*.log
 
 # Ignore all images and output visualizations
 *.png
