@@ -215,15 +215,16 @@ def prepare_consumer_specific_data(df_readings, df_temperature, df_recent_paymen
     
     return daily_consumption
 
-def train_lightgbm_model(data, test_size=0.2):
+def train_lightgbm_model(data, test_size=0.2, params=None):
     """
-    Train LightGBM model with time series cross-validation
+    Train LightGBM model with given parameters
     """
     logging.info("Training LightGBM model...")
+    logging.info(f"Parameters: {params}")
     
     # Prepare features
     feature_cols = ['avg_temp', 'recent_payments', 'year', 'month', 'day_of_week', 
-                   'day_of_year', 'week_of_year', 'rolling_mean_7', 'rolling_mean_14', 'rolling_mean_30']
+                    'day_of_year', 'week_of_year', 'rolling_mean_7', 'rolling_mean_14', 'rolling_mean_30']
     
     if 'consumer_id' in data.columns:
         feature_cols.append('consumer_id')
@@ -247,20 +248,6 @@ def train_lightgbm_model(data, test_size=0.2):
     y_train = train_data['y']
     X_test = test_data[available_features]
     y_test = test_data['y']
-    
-    # LightGBM parameters
-    params = {
-        'objective': 'regression',
-        'metric': 'rmse',
-        'boosting_type': 'gbdt',
-        'num_leaves': 31,
-        'learning_rate': 0.05,
-        'feature_fraction': 0.9,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 5,
-        'verbose': -1,
-        'force_col_wise': True  # Use column-wise processing for large datasets
-    }
     
     # Create datasets
     train_dataset = lgb.Dataset(X_train, label=y_train, categorical_feature=categorical_feature)
@@ -372,6 +359,34 @@ def main():
     logging.info("Starting LightGBM System-Wide Consumption Forecasting")
     logging.info("=" * 60)
 
+    # Define hyperparameter grid
+    param_grid = {
+        'num_leaves': [31, 64, 128],
+        'learning_rate': [0.05, 0.03, 0.1],
+        'min_data_in_leaf': [20, 50],
+        'feature_fraction': [0.9, 0.8, 0.7],
+        'bagging_fraction': [0.8, 0.6]
+    }
+    
+    # Select a subset of combinations to keep runtime manageable
+    param_combinations = [
+        {'num_leaves': 31, 'learning_rate': 0.05, 'min_data_in_leaf': 20, 'feature_fraction': 0.9, 'bagging_fraction': 0.8},
+        {'num_leaves': 64, 'learning_rate': 0.05, 'min_data_in_leaf': 20, 'feature_fraction': 0.9, 'bagging_fraction': 0.8},
+        {'num_leaves': 64, 'learning_rate': 0.03, 'min_data_in_leaf': 50, 'feature_fraction': 0.8, 'bagging_fraction': 0.8},
+        {'num_leaves': 128, 'learning_rate': 0.03, 'min_data_in_leaf': 50, 'feature_fraction': 0.8, 'bagging_fraction': 0.6},
+        {'num_leaves': 64, 'learning_rate': 0.1, 'min_data_in_leaf': 20, 'feature_fraction': 0.7, 'bagging_fraction': 0.6}
+    ]
+    
+    # Base parameters
+    base_params = {
+        'objective': 'regression',
+        'metric': 'rmse',
+        'boosting_type': 'gbdt',
+        'bagging_freq': 5,
+        'verbose': -1,
+        'force_col_wise': True
+    }
+
     # 1. Read and merge all reading files
     logging.info("Step 1: Loading and merging reading data...")
     reading_files = glob.glob("csv/*reading*.csv")
@@ -417,7 +432,6 @@ def main():
         df_payments = pd.read_csv("csv/confirmed_payment.csv")
         df_payments['payment_date'] = pd.to_datetime(df_payments['payment_date'])
         df_payments = df_payments.dropna(subset=['payment_date'])
-        # Filter payments to selected consumers and map IDs
         df_payments = df_payments[df_payments['consumer_id'].isin(unique_consumers)]
         df_payments['consumer_id'] = df_payments['consumer_id'].map(consumer_id_map)
         df_recent_payments = calculate_recent_payments(df_readings, df_payments)
@@ -443,7 +457,6 @@ def main():
     user_mean = user_mean[user_mean > 0]
     logging.info(f"Consumers with positive mean consumption: {len(user_mean)}")
 
-    # Perform clustering
     from sklearn.cluster import KMeans
     X = user_mean.values.reshape(-1, 1)
     kmeans = KMeans(n_clusters=3, random_state=0).fit(X)
@@ -454,14 +467,12 @@ def main():
     for i, center in enumerate(centroids):
         logging.info(f"Group {i}: {center[0]:.2f} kWh/day")
 
-    # Assign group labels
     user_group_df = pd.DataFrame({
         'consumer_id': user_mean.index,
         'mean_consumption': user_mean.values,
         'group': user_groups
     })
 
-    # Merge group labels back into the daily consumption data
     temp_df = temp_df.merge(user_group_df[['consumer_id', 'group']], on='consumer_id', how='left')
 
     # 6. Remove outliers per group using IQR
@@ -475,36 +486,71 @@ def main():
     logging.info("Step 7: Preparing consumer-specific data...")
     consumer_specific_data = prepare_consumer_specific_data(temp_df, df_temperature, df_recent_payments)
 
-    # 8. Train LightGBM models
-    logging.info("Step 8: Training system-wide LightGBM model...")
-    system_model, system_features, system_rmse, system_mae = train_lightgbm_model(system_wide_data, test_size=0.2)
-    
-    logging.info("Step 8: Training consumer-specific LightGBM model...")
-    consumer_model, consumer_features, consumer_rmse, consumer_mae = train_lightgbm_model(consumer_specific_data, test_size=0.2)
+    # 8. Train LightGBM models with hyperparameter tuning
+    best_system_model = None
+    best_system_features = None
+    best_system_rmse = float('inf')
+    best_system_mae = float('inf')
+    best_system_params = None
 
-    # 9. Forecast future
+    best_consumer_model = None
+    best_consumer_features = None
+    best_consumer_rmse = float('inf')
+    best_consumer_mae = float('inf')
+    best_consumer_params = None
+
+    logging.info("Step 8: Training LightGBM models with hyperparameter tuning...")
+    
+    for i, param_set in enumerate(param_combinations):
+        logging.info(f"Testing parameter set {i+1}/{len(param_combinations)}")
+        
+        # Update parameters
+        current_params = base_params.copy()
+        current_params.update(param_set)
+        
+        # Train system-wide model
+        logging.info("Training system-wide LightGBM model...")
+        system_model, system_features, system_rmse, system_mae = train_lightgbm_model(system_wide_data, test_size=0.2, params=current_params)
+        
+        if system_rmse < best_system_rmse:
+            best_system_model = system_model
+            best_system_features = system_features
+            best_system_rmse = system_rmse
+            best_system_mae = system_mae
+            best_system_params = current_params
+        
+        # Train consumer-specific model
+        logging.info("Training consumer-specific LightGBM model...")
+        consumer_model, consumer_features, consumer_rmse, consumer_mae = train_lightgbm_model(consumer_specific_data, test_size=0.2, params=current_params)
+        
+        if consumer_rmse < best_consumer_rmse:
+            best_consumer_model = consumer_model
+            best_consumer_features = consumer_features
+            best_consumer_rmse = consumer_rmse
+            best_consumer_mae = consumer_mae
+            best_consumer_params = current_params
+
+    # Log best parameters
+    logging.info(f"Best system-wide parameters: {best_system_params}")
+    logging.info(f"Best system-wide RMSE: {best_system_rmse:.2f}, MAE: {best_system_mae:.2f}")
+    logging.info(f"Best consumer-specific parameters: {best_consumer_params}")
+    logging.info(f"Best consumer-specific RMSE: {best_consumer_rmse:.2f}, MAE: {best_consumer_mae:.2f}")
+
+    # 9. Forecast future with best models
     logging.info("Step 9: Forecasting future consumption (system-wide)...")
-    system_forecast_df = forecast_system_future(system_model, system_wide_data, system_features, periods=100)
+    system_forecast_df = forecast_system_future(best_system_model, system_wide_data, best_system_features, periods=100)
     
     logging.info("Step 9: Forecasting future consumption (consumer-specific)...")
-    consumer_forecast_df = forecast_consumer_future(consumer_model, consumer_specific_data, consumer_features, periods=100)
+    consumer_forecast_df = forecast_consumer_future(best_consumer_model, consumer_specific_data, best_consumer_features, periods=100)
 
-    # Compute average from consumer-specific forecast for comparison
     consumer_avg_forecast = consumer_forecast_df.groupby('ds')['yhat'].mean().reset_index(name='yhat_avg')
 
-    # 10. Create visualization (for system-wide)
+    # 10. Create visualization
     logging.info("Step 10: Creating visualization...")
     plt.figure(figsize=(15, 8))
-    
-    # Plot historical data
     plt.plot(system_wide_data['ds'], system_wide_data['y'], 'b.', alpha=0.6, label='Historical Average', markersize=2)
-    
-    # Plot system-wide forecast
     plt.plot(system_forecast_df['ds'], system_forecast_df['yhat'], 'r-', linewidth=2, label='System-Wide Forecast')
-    
-    # Plot average from consumer-specific
     plt.plot(consumer_avg_forecast['ds'], consumer_avg_forecast['yhat_avg'], 'g--', linewidth=2, label='Consumer-Specific Avg Forecast')
-    
     plt.title('System-Wide Average Consumption Forecast (LightGBM)', fontsize=16)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Average Daily Consumption (kWh)', fontsize=12)
@@ -512,49 +558,42 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.xticks(rotation=45)
     plt.tight_layout()
-    
     plt.savefig('lightgbm_system_forecast.png', dpi=300, bbox_inches='tight')
     logging.info("Forecast plot saved as 'lightgbm_system_forecast.png'")
 
     # 11. Save results
     logging.info("Step 11: Saving results...")
-    
-    # Save system-wide forecast
     system_forecast_df.to_csv('lightgbm_system_forecast.csv', index=False)
     logging.info("System-wide forecast saved as 'lightgbm_system_forecast.csv'")
     
-    # Save consumer-specific forecast
     consumer_forecast_df.to_csv('lightgbm_consumer_forecast.csv', index=False)
     logging.info("Consumer-specific forecast saved as 'lightgbm_consumer_forecast.csv'")
     
-    # Save average from consumer-specific
     consumer_avg_forecast.to_csv('lightgbm_consumer_avg_forecast.csv', index=False)
     logging.info("Consumer-specific average forecast saved as 'lightgbm_consumer_avg_forecast.csv'")
     
-    # Save model info (system-wide)
     model_info = {
-        'rmse': system_rmse,
-        'mae': system_mae,
-        'mae_median_ratio': (system_mae/system_wide_data['y'].median())*100,
-        'features_used': system_features,
+        'rmse': best_system_rmse,
+        'mae': best_system_mae,
+        'mae_median_ratio': (best_system_mae/system_wide_data['y'].median())*100,
+        'features_used': best_system_features,
         'data_points': len(system_wide_data),
-        'date_range': f"{system_wide_data['ds'].min()} to {system_wide_data['ds'].max()}"
+        'date_range': f"{system_wide_data['ds'].min()} to {system_wide_data['ds'].max()}",
+        'best_params': [best_system_params]
     }
-    
     model_info_df = pd.DataFrame([model_info])
     model_info_df.to_csv('lightgbm_system_model_info.csv', index=False)
     logging.info("System-wide model info saved as 'lightgbm_system_model_info.csv'")
     
-    # Save model info (consumer-specific)
     consumer_model_info = {
-        'rmse': consumer_rmse,
-        'mae': consumer_mae,
-        'mae_median_ratio': (consumer_mae/consumer_specific_data['y'].median())*100,
-        'features_used': consumer_features,
+        'rmse': best_consumer_rmse,
+        'mae': best_consumer_mae,
+        'mae_median_ratio': (best_consumer_mae/consumer_specific_data['y'].median())*100,
+        'features_used': best_consumer_features,
         'data_points': len(consumer_specific_data),
-        'date_range': f"{consumer_specific_data['ds'].min()} to {consumer_specific_data['ds'].max()}"
+        'date_range': f"{consumer_specific_data['ds'].min()} to {consumer_specific_data['ds'].max()}",
+        'best_params': [best_consumer_params]
     }
-    
     consumer_model_info_df = pd.DataFrame([consumer_model_info])
     consumer_model_info_df.to_csv('lightgbm_consumer_model_info.csv', index=False)
     logging.info("Consumer-specific model info saved as 'lightgbm_consumer_model_info.csv'")
@@ -562,12 +601,12 @@ def main():
     logging.info("\nLightGBM System-Wide and Consumer-Specific Forecasting completed!")
     logging.info("=" * 60)
     logging.info(f"Total runtime: {time.time() - start_time:.2f} seconds")
-    logging.info(f"System-wide Final RMSE: {system_rmse:.2f}")
-    logging.info(f"System-wide Final MAE: {system_mae:.2f}")
-    logging.info(f"System-wide MAE/Median ratio: {(system_mae/system_wide_data['y'].median())*100:.1f}%")
-    logging.info(f"Consumer-specific Final RMSE: {consumer_rmse:.2f}")
-    logging.info(f"Consumer-specific Final MAE: {consumer_mae:.2f}")
-    logging.info(f"Consumer-specific MAE/Median ratio: {(consumer_mae/consumer_specific_data['y'].median())*100:.1f}%")
+    logging.info(f"System-wide Final RMSE: {best_system_rmse:.2f}")
+    logging.info(f"System-wide Final MAE: {best_system_mae:.2f}")
+    logging.info(f"System-wide MAE/Median ratio: {(best_system_mae/system_wide_data['y'].median())*100:.1f}%")
+    logging.info(f"Consumer-specific Final RMSE: {best_consumer_rmse:.2f}")
+    logging.info(f"Consumer-specific Final MAE: {best_consumer_mae:.2f}")
+    logging.info(f"Consumer-specific MAE/Median ratio: {(best_consumer_mae/consumer_specific_data['y'].median())*100:.1f}%")
 
 if __name__ == "__main__":
     main()
