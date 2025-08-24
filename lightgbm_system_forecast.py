@@ -163,7 +163,7 @@ def prepare_consumer_specific_data(df_readings, df_temperature, df_recent_paymen
     daily_consumption = df_readings.copy()
     daily_consumption['ds'] = daily_consumption['reading_date']
     daily_consumption['y'] = daily_consumption['consumption']
-    daily_consumption['group'] = daily_consumption['group'].astype(int)  # Add cluster group
+    daily_consumption['group'] = daily_consumption['group'].astype(int)
     
     if df_temperature is not None:
         daily_consumption = daily_consumption.merge(df_temperature, left_on='ds', right_on='reading_date', how='left')
@@ -231,8 +231,8 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
     categorical_feature = [col for col in ['consumer_id', 'group'] if col in available_features]
     
     split_idx = int(len(data) * (1 - test_size))
-    train_data = data.iloc[:split_idx]
-    test_data = data.iloc[split_idx:]
+    train_data = data.iloc[:split_idx].copy()
+    test_data = data.iloc[split_idx:].copy()
     
     logging.info(f"Train size: {len(train_data)}, Test size: {len(test_data)}")
     
@@ -248,7 +248,7 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
         params,
         train_dataset,
         valid_sets=[test_dataset],
-        num_boost_round=2000,  # Increased from 1000
+        num_boost_round=2000,
         callbacks=[
             lgb.early_stopping(stopping_rounds=50),
             lgb.log_evaluation(period=100)
@@ -256,12 +256,24 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
     )
     
     y_pred = model.predict(X_test)
-    y_train_pred = model.predict(X_train)  # Add training predictions
+    y_train_pred = model.predict(X_train)
     
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     mae = mean_absolute_error(y_test, y_pred)
     train_rmse = np.sqrt(mean_squared_error(y_train, y_train_pred))
     train_mae = mean_absolute_error(y_train, y_train_pred)
+    
+    # Compute error by group only if 'group' column exists (consumer-specific model)
+    if 'group' in test_data.columns:
+        test_data['y_pred'] = y_pred
+        error_by_group = test_data.groupby('group').apply(
+            lambda x: pd.Series({
+                'RMSE': np.sqrt(mean_squared_error(x['y'], x['y_pred'])),
+                'MAE': mean_absolute_error(x['y'], x['y_pred']),
+                'Count': len(x)
+            })
+        ).reset_index()
+        logging.info(f"Error by cluster group:\n{error_by_group}")
     
     logging.info(f"Train RMSE: {train_rmse:.2f}")
     logging.info(f"Train MAE: {train_mae:.2f}")
@@ -371,10 +383,10 @@ def main():
         'objective': 'regression',
         'metric': 'rmse',
         'boosting_type': 'gbdt',
-        'num_leaves': 128,
+        'num_leaves': 64,
         'learning_rate': 0.03,
-        'min_data_in_leaf': 50,
-        'feature_fraction': 0.8,
+        'min_data_in_leaf': 100,
+        'feature_fraction': 0.7,
         'bagging_fraction': 0.6,
         'bagging_freq': 5,
         'verbose': -1,
@@ -391,8 +403,8 @@ def main():
     df_readings = df_readings.dropna(subset=['reading_date'])
 
     # Select a small fraction (first 100 unique consumers) for testing
-    unique_consumers = df_readings['consumer_id'].unique()[:100]
-    df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
+    unique_consumers = df_readings['consumer_id'].unique()
+    # df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
     logging.info(f"Selected {len(unique_consumers)} unique consumers for testing.")
 
     # Map consumer_id to consecutive integers starting from 0
