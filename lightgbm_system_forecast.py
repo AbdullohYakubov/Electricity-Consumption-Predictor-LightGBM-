@@ -31,9 +31,10 @@ def calculate_recent_payments(df_readings, df_payments):
         return pd.DataFrame(columns=['consumer_id', 'reading_date', 'recent_payments'])
     
     dd_payments = dd.from_pandas(df_payments, npartitions=10)
-    dd_readings = dd.from_pandas(df_readings, npartitions=10)
+    dd_readings = dd.from_pandas(df_readings[['consumer_id', 'reading_date']], npartitions=10)
     
-    def compute_payments(cid, group):
+    def compute_payments(group):
+        cid = group['consumer_id'].iloc[0]
         payments = dd_payments[dd_payments['consumer_id'] == cid].compute()
         if payments.empty:
             return pd.DataFrame()
@@ -508,7 +509,7 @@ def main():
     df_readings['reading_date'] = pd.to_datetime(df_readings['reading_date'])
     df_readings = df_readings.dropna(subset=['reading_date'])
 
-    # # Select a small fraction (first 100 unique consumers) for testing
+    # Select a small fraction (first 100 unique consumers) for testing
     # unique_consumers = df_readings['consumer_id'].unique()[:100]
     # df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
     # logging.info(f"Selected {len(unique_consumers)} unique consumers for testing.")
