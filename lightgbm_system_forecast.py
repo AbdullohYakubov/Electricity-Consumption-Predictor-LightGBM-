@@ -10,6 +10,7 @@ import warnings
 import time
 import logging
 from sklearn.cluster import KMeans
+import dask.dataframe as dd
 
 warnings.filterwarnings('ignore')
 
@@ -24,28 +25,27 @@ logging.basicConfig(
 )
 
 def calculate_recent_payments(df_readings, df_payments):
-    """
-    Calculate recent payments within 30 days for each reading date and consumer
-    """
-    logging.info("Calculating recent payments...")
+    logging.info("Calculating recent payments with Dask...")
     if df_payments.empty:
         logging.warning("Payment DataFrame is empty, returning empty recent payments")
         return pd.DataFrame(columns=['consumer_id', 'reading_date', 'recent_payments'])
     
-    df_payments = df_payments.sort_values(['consumer_id', 'payment_date'])
-    df_readings = df_readings.sort_values(['consumer_id', 'reading_date'])
+    dd_payments = dd.from_pandas(df_payments, npartitions=10)
+    dd_readings = dd.from_pandas(df_readings, npartitions=10)
     
-    result = []
-    for cid, group in df_readings.groupby('consumer_id'):
-        payments = df_payments[df_payments['consumer_id'] == cid]
+    def compute_payments(cid, group):
+        payments = dd_payments[dd_payments['consumer_id'] == cid].compute()
         if payments.empty:
-            continue
+            return pd.DataFrame()
+        result = []
         for date in group['reading_date']:
             mask = (payments['payment_date'] <= date) & (payments['payment_date'] > date - pd.Timedelta(days=30))
             total_payment = payments.loc[mask, 'amount'].sum()
             result.append({'consumer_id': cid, 'reading_date': date, 'recent_payments': total_payment})
+        return pd.DataFrame(result)
     
-    df_recent_payments = pd.DataFrame(result)
+    result = dd_readings.groupby('consumer_id').apply(compute_payments, meta={'consumer_id': 'int64', 'reading_date': 'datetime64[ns]', 'recent_payments': 'float64'}).compute()
+    df_recent_payments = result.reset_index(drop=True)
     logging.info(f"Recent payments DataFrame shape: {df_recent_payments.shape}")
     logging.info(f"Recent payments columns: {df_recent_payments.columns.tolist()}")
     return df_recent_payments
