@@ -24,33 +24,6 @@ logging.basicConfig(
     ]
 )
 
-def calculate_recent_payments(df_readings, df_payments):
-    logging.info("Calculating recent payments with Dask...")
-    if df_payments.empty:
-        logging.warning("Payment DataFrame is empty, returning empty recent payments")
-        return pd.DataFrame(columns=['consumer_id', 'reading_date', 'recent_payments'])
-    
-    dd_payments = dd.from_pandas(df_payments, npartitions=10)
-    dd_readings = dd.from_pandas(df_readings[['consumer_id', 'reading_date']], npartitions=10)
-    
-    def compute_payments(group):
-        cid = group['consumer_id'].iloc[0]
-        payments = dd_payments[dd_payments['consumer_id'] == cid].compute()
-        if payments.empty:
-            return pd.DataFrame()
-        result = []
-        for date in group['reading_date']:
-            mask = (payments['payment_date'] <= date) & (payments['payment_date'] > date - pd.Timedelta(days=30))
-            total_payment = payments.loc[mask, 'amount'].sum()
-            result.append({'consumer_id': cid, 'reading_date': date, 'recent_payments': total_payment})
-        return pd.DataFrame(result)
-    
-    result = dd_readings.groupby('consumer_id').apply(compute_payments, meta={'consumer_id': 'int64', 'reading_date': 'datetime64[ns]', 'recent_payments': 'float64'}).compute()
-    df_recent_payments = result.reset_index(drop=True)
-    logging.info(f"Recent payments DataFrame shape: {df_recent_payments.shape}")
-    logging.info(f"Recent payments columns: {df_recent_payments.columns.tolist()}")
-    return df_recent_payments
-
 def prepare_all_daily_consumption(df_readings):
     """
     Calculate daily consumption for all consumers
@@ -112,15 +85,6 @@ def prepare_system_wide_data(df_readings, df_temperature, df_recent_payments):
     else:
         daily_consumption['avg_temp'] = 20.0
     
-    if df_recent_payments is not None and not df_recent_payments.empty and 'reading_date' in df_recent_payments.columns:
-        df_recent_payments = df_recent_payments.rename(columns={'reading_date': 'ds'})
-        daily_payments = df_recent_payments.groupby('ds')['recent_payments'].mean().reset_index()
-        daily_consumption = daily_consumption.merge(daily_payments, on='ds', how='left')
-        daily_consumption['recent_payments'] = daily_consumption['recent_payments'].fillna(0.0)
-    else:
-        logging.warning("No valid recent payments data available, setting recent_payments to 0.0")
-        daily_consumption['recent_payments'] = 0.0
-    
     daily_consumption['year'] = daily_consumption['ds'].dt.year
     daily_consumption['month'] = daily_consumption['ds'].dt.month
     daily_consumption['day_of_week'] = daily_consumption['ds'].dt.dayofweek
@@ -168,15 +132,6 @@ def prepare_consumer_specific_data(df_readings, df_temperature, df_recent_paymen
     else:
         daily_consumption['avg_temp'] = 20.0
     
-    if df_recent_payments is not None and not df_recent_payments.empty and 'reading_date' in df_recent_payments.columns:
-        df_recent_payments = df_recent_payments.rename(columns={'reading_date': 'ds'})
-        logging.info(f"Columns in df_recent_payments after rename: {df_recent_payments.columns}")
-        daily_consumption = daily_consumption.merge(df_recent_payments, on=['consumer_id', 'ds'], how='left')
-        daily_consumption['recent_payments'] = daily_consumption['recent_payments'].fillna(0.0)
-    else:
-        logging.warning("No valid recent payments data available, setting recent_payments to 0.0")
-        daily_consumption['recent_payments'] = 0.0
-    
     daily_consumption['year'] = daily_consumption['ds'].dt.year
     daily_consumption['month'] = daily_consumption['ds'].dt.month
     daily_consumption['day_of_week'] = daily_consumption['ds'].dt.dayofweek
@@ -223,16 +178,6 @@ def prepare_group_data(df_readings, df_temperature, df_recent_payments, group_id
     else:
         daily_consumption['avg_temp'] = 20.0
     
-    if df_recent_payments is not None and not df_recent_payments.empty and 'reading_date' in df_recent_payments.columns:
-        group_payments = df_recent_payments[df_recent_payments['consumer_id'].isin(group_data['consumer_id'].unique())]
-        group_payments = group_payments.rename(columns={'reading_date': 'ds'})
-        daily_payments = group_payments.groupby('ds')['recent_payments'].mean().reset_index()
-        daily_consumption = daily_consumption.merge(daily_payments, on='ds', how='left')
-        daily_consumption['recent_payments'] = daily_consumption['recent_payments'].fillna(0.0)
-    else:
-        logging.warning(f"No valid recent payments data for group {group_id}, setting recent_payments to 0.0")
-        daily_consumption['recent_payments'] = 0.0
-    
     daily_consumption['year'] = daily_consumption['ds'].dt.year
     daily_consumption['month'] = daily_consumption['ds'].dt.month
     daily_consumption['day_of_week'] = daily_consumption['ds'].dt.dayofweek
@@ -268,7 +213,7 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
     logging.info("Training LightGBM model...")
     logging.info(f"Parameters: {params}")
     
-    feature_cols = ['avg_temp', 'recent_payments', 'year', 'month', 'day_of_week', 
+    feature_cols = ['avg_temp', 'year', 'month', 'day_of_week', 
                     'day_of_year', 'week_of_year', 'rolling_mean_7', 'rolling_mean_14', 
                     'rolling_mean_30']
     
@@ -388,7 +333,6 @@ def forecast_consumer_future(model, data, features, periods=100):
                 'day_of_year': date.dayofyear,
                 'week_of_year': date.isocalendar().week,
                 'avg_temp': consumer_data['avg_temp'],
-                'recent_payments': consumer_data['recent_payments'],
                 'rolling_mean_7': consumer_data['rolling_mean_7'],
                 'rolling_mean_14': consumer_data['rolling_mean_14'],
                 'rolling_mean_30': consumer_data['rolling_mean_30']
@@ -510,9 +454,9 @@ def main():
     df_readings = df_readings.dropna(subset=['reading_date'])
 
     # Select a small fraction (first 100 unique consumers) for testing
-    # unique_consumers = df_readings['consumer_id'].unique()[:100]
-    # df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
-    # logging.info(f"Selected {len(unique_consumers)} unique consumers for testing.")
+    unique_consumers = df_readings['consumer_id'].unique()[:100]
+    df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
+    logging.info(f"Selected {len(unique_consumers)} unique consumers for testing.")
 
     # Filter consumers with sufficient data
     days_per_consumer = df_readings.groupby('consumer_id')['reading_date'].nunique()
@@ -552,29 +496,10 @@ def main():
         logging.warning(f"Could not load temperature data: {e}")
         df_temperature = None
 
-    # 3. Read payments and calculate recent payments
-    logging.info("Step 3: Loading payment data...")
-    try:
-        # Explicitly specify required columns to avoid parsing issues
-        df_payments = pd.read_csv("csv/confirmed_payment.csv", usecols=['consumer_id', 'amount', 'payment_date'])
-        df_payments['payment_date'] = pd.to_datetime(df_payments['payment_date'])
-        df_payments = df_payments.dropna(subset=['payment_date'])
-        logging.info(f"Raw payments DataFrame shape: {df_payments.shape}")
-        logging.info(f"Raw payments columns: {df_payments.columns.tolist()}")
-        logging.info(f"Sample payments data:\n{df_payments.head().to_string()}")
-        
-        # Filter payments for valid consumer IDs before mapping
-        df_payments = df_payments[df_payments['consumer_id'].isin(original_consumer_ids)]
-        df_payments['consumer_id'] = df_payments['consumer_id'].map(consumer_id_map)
-        df_payments = df_payments.dropna(subset=['consumer_id'])
-        
-        logging.info(f"Filtered payments DataFrame shape: {df_payments.shape}")
-        logging.info(f"Payments columns: {df_payments.columns.tolist()}")
-        df_recent_payments = calculate_recent_payments(df_readings, df_payments)
-        logging.info("Payment data processed successfully")
-    except Exception as e:
-        logging.warning(f"Could not load payment data: {e}")
-        df_recent_payments = pd.DataFrame(columns=['consumer_id', 'reading_date', 'recent_payments'])
+    df_recent_payments = pd.DataFrame(columns=['consumer_id', 'reading_date', 'recent_payments'])
+
+    print(df_recent_payments['recent_payments'].describe())
+    print(f"Percentage of zero payments: {(df_recent_payments['recent_payments'] == 0).mean() * 100:.1f}%")
 
     logging.info(f"Date range: {df_readings['reading_date'].min()} to {df_readings['reading_date'].max()}")
 
