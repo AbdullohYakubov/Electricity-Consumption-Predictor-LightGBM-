@@ -42,8 +42,6 @@ def prepare_all_daily_consumption(df_readings):
     if not negative_rows.empty:
         negative_ids = negative_rows['consumer_id'].unique().tolist()
         logging.info(f"Negative consumption detected for {len(negative_rows)} rows across {len(negative_ids)} consumer_ids: {negative_ids}")
-        for _, row in negative_rows.iterrows():
-            logging.info(f"Consumer {row['consumer_id']}, Date {row['reading_date']}, Consumption {row['consumption']:.6f} kWh, Prev Reading {row['prev_reading']:.6f}, Max Reading {row['max_reading']:.6f}")
         # Interpolate negative consumptions with median for the consumer
         median_consumption = agg[agg['consumption'] >= 0].groupby('consumer_id')['consumption'].median().to_dict()
         agg['consumption'] = agg.apply(
@@ -530,8 +528,7 @@ def main():
     logging.info(f"Max unique days per consumer: {days_per_consumer.max()}")
     valid_consumers = days_per_consumer[days_per_consumer >= min_days].index
     excluded_consumers = days_per_consumer[days_per_consumer < min_days].index
-    # if len(excluded_consumers) > 0:
-    #     logging.info(f"Excluded {len(excluded_consumers)} consumers with < {min_days} days: {excluded_consumers.tolist()}")
+    logging.info(f"Excluded {len(excluded_consumers)} consumers due to insufficient data")
     df_readings = df_readings[df_readings['consumer_id'].isin(valid_consumers)]
     logging.info(f"Filtered to {len(valid_consumers)} consumers with >= {min_days} days")
 

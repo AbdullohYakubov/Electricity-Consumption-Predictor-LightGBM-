@@ -11,9 +11,19 @@ __pycache__/
 # Ignore CSV input & output files
 *.csv
 *.log
+*.txt
 
 # Ignore all images and output visualizations
 *.png
 *.jpg
 *.jpeg
 *.svg
+
+!lightgbm_system_forecast.png
+!lightgbm_group_forecast.png
+
+!lightgbm_system_model_info.csv
+!lightgbm_consumer_model_info.csv
+!lightgbm_group_0_model_info.csv
+!lightgbm_group_1_model_info.csv
+!lightgbm_group_2_model_info.csv
