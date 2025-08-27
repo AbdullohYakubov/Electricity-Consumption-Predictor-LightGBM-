@@ -1,4 +1,5 @@
 import pandas as pd
+import dask.dataframe as dd
 import glob
 import numpy as np
 from datetime import timedelta, datetime
@@ -24,9 +25,7 @@ logging.basicConfig(
 
 # ------------------ Data Preparation Functions ------------------
 def prepare_all_daily_consumption(df_readings):
-    """
-    Calculate daily consumption for all consumers
-    """
+    """Calculate daily consumption for all consumers, handling negative consumptions."""
     logging.info("Calculating daily consumption...")
     agg = df_readings.groupby(['consumer_id', 'reading_date'])['reading'].agg(
         max_reading='max',
@@ -38,14 +37,18 @@ def prepare_all_daily_consumption(df_readings):
     agg = agg.dropna(subset=['prev_reading'])
     agg['consumption'] = agg['max_reading'] - agg['prev_reading']
     
-    # Log and remove negative consumptions
+    # Handle negative consumptions
     negative_rows = agg[agg['consumption'] < 0][['consumer_id', 'reading_date', 'consumption', 'prev_reading', 'max_reading']]
     if not negative_rows.empty:
         negative_ids = negative_rows['consumer_id'].unique().tolist()
         logging.info(f"Negative consumption detected for {len(negative_rows)} rows across {len(negative_ids)} consumer_ids: {negative_ids}")
         for _, row in negative_rows.iterrows():
             logging.info(f"Consumer {row['consumer_id']}, Date {row['reading_date']}, Consumption {row['consumption']:.6f} kWh, Prev Reading {row['prev_reading']:.6f}, Max Reading {row['max_reading']:.6f}")
-        agg = agg[agg['consumption'] >= 0]  # Remove negative consumptions
+        # Interpolate negative consumptions with median for the consumer
+        median_consumption = agg[agg['consumption'] >= 0].groupby('consumer_id')['consumption'].median().to_dict()
+        agg['consumption'] = agg.apply(
+            lambda x: median_consumption.get(x['consumer_id'], 0) if x['consumption'] < 0 else x['consumption'], axis=1
+        )
     
     agg['days_diff'] = (agg['reading_date'] - agg['prev_date']).dt.days
     agg = agg[agg['days_diff'] > 0]
@@ -66,6 +69,8 @@ def prepare_all_daily_consumption(df_readings):
 def remove_iqr_outliers(df, group_col='group', value_col='consumption'):
     """Remove outliers from value_col based on IQR, computed per group_col."""
     def iqr_filter(group_df):
+        if len(group_df) < 4:
+            return group_df
         Q1 = group_df[value_col].quantile(0.25)
         Q3 = group_df[value_col].quantile(0.75)
         IQR = Q3 - Q1
@@ -76,7 +81,7 @@ def remove_iqr_outliers(df, group_col='group', value_col='consumption'):
     return df.groupby(group_col, group_keys=False).apply(iqr_filter).reset_index(drop=True)
 
 def prepare_system_wide_data(df_readings, df_temperature):
-    """Prepare system-wide aggregated data with features for LightGBM (average consumption)."""
+    """Prepare system-wide aggregated data with features for LightGBM."""
     logging.info("Preparing system-wide aggregated data...")
     
     daily_consumption = df_readings.groupby('reading_date')['consumption'].mean().reset_index()
@@ -87,8 +92,6 @@ def prepare_system_wide_data(df_readings, df_temperature):
         if 'tavg' in daily_consumption.columns:
             daily_consumption = daily_consumption.rename(columns={'tavg': 'avg_temp'})
         daily_consumption['avg_temp'] = daily_consumption['avg_temp'].fillna(daily_consumption['avg_temp'].median())
-    else:
-        daily_consumption['avg_temp'] = 20.0
     
     daily_consumption['year'] = daily_consumption['ds'].dt.year
     daily_consumption['month'] = daily_consumption['ds'].dt.month
@@ -106,6 +109,7 @@ def prepare_system_wide_data(df_readings, df_temperature):
     daily_consumption['rolling_mean_30'] = daily_consumption['rolling_mean_30'].fillna(daily_consumption['y'])
     
     daily_consumption = daily_consumption.dropna(subset=['y'])
+    daily_consumption = daily_consumption[daily_consumption['y'] >= 0]
     
     logging.info(f"System data shape: {daily_consumption.shape}")
     logging.info(f"Date range: {daily_consumption['ds'].min()} to {daily_consumption['ds'].max()}")
@@ -114,7 +118,7 @@ def prepare_system_wide_data(df_readings, df_temperature):
     return daily_consumption
 
 def prepare_consumer_specific_data(df_readings, df_temperature):
-    """Prepare consumer-specific data with features for LightGBM (individual consumption)."""
+    """Prepare consumer-specific data with features for LightGBM."""
     logging.info("Preparing consumer-specific data...")
     
     daily_consumption = df_readings.copy()
@@ -127,8 +131,6 @@ def prepare_consumer_specific_data(df_readings, df_temperature):
         if 'tavg' in daily_consumption.columns:
             daily_consumption = daily_consumption.rename(columns={'tavg': 'avg_temp'})
         daily_consumption['avg_temp'] = daily_consumption['avg_temp'].fillna(daily_consumption['avg_temp'].median())
-    else:
-        daily_consumption['avg_temp'] = 20.0
     
     daily_consumption['year'] = daily_consumption['ds'].dt.year
     daily_consumption['month'] = daily_consumption['ds'].dt.month
@@ -146,6 +148,7 @@ def prepare_consumer_specific_data(df_readings, df_temperature):
     daily_consumption['rolling_mean_30'] = daily_consumption['rolling_mean_30'].fillna(daily_consumption['y'])
     
     daily_consumption = daily_consumption.dropna(subset=['y'])
+    daily_consumption = daily_consumption[daily_consumption['y'] >= 0]
     
     logging.info(f"Consumer-specific data shape: {daily_consumption.shape}")
     logging.info(f"Date range: {daily_consumption['ds'].min()} to {daily_consumption['ds'].max()}")
@@ -154,7 +157,7 @@ def prepare_consumer_specific_data(df_readings, df_temperature):
     return daily_consumption
 
 def prepare_group_data(df_readings, df_temperature, group_id):
-    """Prepare data for a specific group with features for LightGBM (average consumption per group)."""
+    """Prepare data for a specific group with features for LightGBM."""
     logging.info(f"Preparing data for group {group_id}...")
     
     group_data = df_readings[df_readings['group'] == group_id].copy()
@@ -166,8 +169,6 @@ def prepare_group_data(df_readings, df_temperature, group_id):
         if 'tavg' in daily_consumption.columns:
             daily_consumption = daily_consumption.rename(columns={'tavg': 'avg_temp'})
         daily_consumption['avg_temp'] = daily_consumption['avg_temp'].fillna(daily_consumption['avg_temp'].median())
-    else:
-        daily_consumption['avg_temp'] = 20.0
     
     daily_consumption['year'] = daily_consumption['ds'].dt.year
     daily_consumption['month'] = daily_consumption['ds'].dt.month
@@ -185,6 +186,7 @@ def prepare_group_data(df_readings, df_temperature, group_id):
     daily_consumption['rolling_mean_30'] = daily_consumption['rolling_mean_30'].fillna(daily_consumption['y'])
     
     daily_consumption = daily_consumption.dropna(subset=['y'])
+    daily_consumption = daily_consumption[daily_consumption['y'] >= 0]
     
     logging.info(f"Group {group_id} data shape: {daily_consumption.shape}")
     logging.info(f"Date range: {daily_consumption['ds'].min()} to {daily_consumption['ds'].max()}")
@@ -289,6 +291,11 @@ def forecast_system_future(model, data, features, periods=100):
         X_future = future_data[features]
         future_predictions = model.predict(X_future)
         
+        # Validate predictions
+        if (future_predictions < 0).any():
+            logging.warning(f"Negative predictions detected in system-wide forecast: {future_predictions[future_predictions < 0]}")
+            future_predictions = np.clip(future_predictions, 0, None)
+        
         forecast_df = pd.DataFrame({
             'ds': future_dates,
             'yhat': future_predictions
@@ -300,7 +307,7 @@ def forecast_system_future(model, data, features, periods=100):
         raise
 
 def forecast_consumer_future(model, data, features, valid_consumers, periods=100):
-    """Forecast future consumption for each consumer, including those with no valid data."""
+    """Forecast future consumption for each consumer."""
     logging.info(f"Forecasting next {periods} days (consumer-specific)...")
     
     try:
@@ -316,7 +323,7 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
                     row = {
                         'ds': date,
                         'consumer_id': consumer_id,
-                        'group': -1,  # Default group for invalid consumers
+                        'group': 0,
                         'year': date.year,
                         'month': date.month,
                         'day_of_week': date.dayofweek,
@@ -351,6 +358,12 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
         X_future = future_data[features]
         future_predictions = model.predict(X_future)
         
+        # Validate predictions
+        if (future_predictions < 0).any():
+            logging.warning(f"Negative predictions detected in consumer-specific forecast: {future_predictions[future_predictions < 0]}")
+            logging.warning(f"Negative predictions detected in consumer-specific forecast: ")
+            future_predictions = np.clip(future_predictions, 0, None)
+        
         forecast_df = pd.DataFrame({
             'ds': future_data['ds'],
             'consumer_id': future_data['consumer_id'],
@@ -363,9 +376,9 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
         logging.error(f"Failed to forecast consumer-specific: {e}")
         raise
 
-def forecast_group_future(model, data, features, periods=100):
+def forecast_group_future(model, data, features, group_id, periods=100):
     """Forecast future average consumption for a specific group."""
-    logging.info(f"Forecasting next {periods} days for group...")
+    logging.info(f"Forecasting next {periods} days for group {group_id}...")
     
     try:
         last_date = data['ds'].max()
@@ -386,6 +399,11 @@ def forecast_group_future(model, data, features, periods=100):
         X_future = future_data[features]
         future_predictions = model.predict(X_future)
         
+        # Validate predictions
+        if (future_predictions < 0).any():
+            logging.warning(f"Negative predictions detected in group {group_id} forecast: {future_predictions[future_predictions < 0]}")
+            future_predictions = np.clip(future_predictions, 0, None)
+        
         forecast_df = pd.DataFrame({
             'ds': future_dates,
             'yhat': future_predictions
@@ -397,11 +415,11 @@ def forecast_group_future(model, data, features, periods=100):
         raise
 
 def cluster_consumers(daily_consumption, n_clusters=3):
-    """Cluster consumers based on mean daily consumption, including those with zero or close-to-zero mean."""
+    """Cluster consumers based on mean daily consumption, retaining all consumers."""
     logging.info("Clustering consumers for data quality...")
     consumer_means = daily_consumption.groupby('consumer_id')['consumption'].mean().reset_index()
     valid_consumers = consumer_means['consumer_id']
-    clustering_consumers = consumer_means[consumer_means['consumption'] >= 0]['consumer_id']  # Include zero mean
+    clustering_consumers = consumer_means[consumer_means['consumption'] >= 0]['consumer_id']
     logging.info(f"Consumers with non-negative mean consumption: {len(clustering_consumers)}")
     X = consumer_means[consumer_means['consumer_id'].isin(clustering_consumers)]['consumption'].values.reshape(-1, 1)
     kmeans = KMeans(n_clusters=n_clusters, random_state=42).fit(X)
@@ -443,7 +461,8 @@ def main():
     }
     
     consumer_params = {
-        'objective': 'regression',
+        'objective': 'tweedie',
+        'tweedie_variance_power': 1.5,
         'metric': 'rmse',
         'boosting_type': 'gbdt',
         'num_leaves': 64,
@@ -471,11 +490,12 @@ def main():
     }
 
     group1_params = {
-        'objective': 'regression',
+        'objective': 'tweedie',
+        'tweedie_variance_power': 1.5,
         'metric': 'rmse',
         'boosting_type': 'gbdt',
-        'num_leaves': 64,
-        'learning_rate': 0.03,
+        'num_leaves': 128,
+        'learning_rate': 0.02,
         'min_data_in_leaf': 50,
         'feature_fraction': 0.7,
         'bagging_fraction': 0.6,
@@ -488,18 +508,20 @@ def main():
     logging.info("Step 1: Loading and merging reading data...")
     try:
         reading_files = glob.glob("csv/*reading*.csv")
+        if not reading_files:
+            raise FileNotFoundError("No reading files found in 'csv/' directory")
         logging.info(f"Found {len(reading_files)} reading files: {reading_files}")
-        df_readings = pd.concat([pd.read_csv(f) for f in reading_files], ignore_index=True)
-        df_readings['reading_date'] = pd.to_datetime(df_readings['reading_date'])
-        df_readings = df_readings.dropna(subset=['reading_date'])
+        df_readings = dd.concat([dd.read_csv(f) for f in reading_files]).compute()
+        df_readings['reading_date'] = pd.to_datetime(df_readings['reading_date'], errors='coerce')
+        if df_readings['reading_date'].isna().any():
+            logging.warning(f"Found {df_readings['reading_date'].isna().sum()} invalid reading dates, dropping...")
+            df_readings = df_readings.dropna(subset=['reading_date'])
+        if df_readings['consumer_id'].isna().any():
+            logging.warning(f"Found {df_readings['consumer_id'].isna().sum()} missing consumer IDs, dropping...")
+            df_readings = df_readings.dropna(subset=['consumer_id'])
     except Exception as e:
         logging.error(f"Failed to load reading files: {e}")
         raise
-
-    # Filter for subset testing
-    # unique_consumers = df_readings['consumer_id'].unique()[:1000]
-    # df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
-    # logging.info(f"Selected {len(unique_consumers)} unique consumers for testing.")
 
     # Filter consumers with sufficient data
     min_days = 365
@@ -507,6 +529,9 @@ def main():
     logging.info(f"Min unique days per consumer: {days_per_consumer.min()}")
     logging.info(f"Max unique days per consumer: {days_per_consumer.max()}")
     valid_consumers = days_per_consumer[days_per_consumer >= min_days].index
+    excluded_consumers = days_per_consumer[days_per_consumer < min_days].index
+    # if len(excluded_consumers) > 0:
+    #     logging.info(f"Excluded {len(excluded_consumers)} consumers with < {min_days} days: {excluded_consumers.tolist()}")
     df_readings = df_readings[df_readings['consumer_id'].isin(valid_consumers)]
     logging.info(f"Filtered to {len(valid_consumers)} consumers with >= {min_days} days")
 
@@ -525,7 +550,7 @@ def main():
     logging.info("Step 2: Loading temperature data...")
     try:
         df_temperature = pd.read_csv("csv/temperature.csv")
-        df_temperature['date'] = pd.to_datetime(df_temperature['date'])
+        df_temperature['date'] = pd.to_datetime(df_temperature['date'], errors='coerce')
         df_temperature = df_temperature.dropna(subset=['date'])
         df_temperature = df_temperature.rename(columns={'date': 'reading_date'})
         logging.info("Temperature data loaded successfully")
@@ -592,7 +617,7 @@ def main():
     group_forecasts = {}
     for group_id, g_model in group_models.items():
         logging.info(f"Step 8: Forecasting future consumption for group {group_id}...")
-        group_forecasts[group_id] = forecast_group_future(g_model, group_data[group_id], group_features[group_id], periods=100)
+        group_forecasts[group_id] = forecast_group_future(g_model, group_data[group_id], group_features[group_id], group_id, periods=100)
 
     # Step 9: Validate outputs
     logging.info("Step 9: Validating output forecasts...")
@@ -601,6 +626,9 @@ def main():
             f"Expected {len(valid_consumers)} consumers, got {consumer_forecast_df['consumer_id'].nunique()}"
         assert consumer_forecast_df.shape[0] == len(valid_consumers) * 100, \
             f"Expected {len(valid_consumers) * 100} rows, got {consumer_forecast_df.shape[0]}"
+        if (consumer_forecast_df['yhat'] < 0).any():
+            logging.warning(f"Negative predictions in consumer forecast: {consumer_forecast_df[consumer_forecast_df['yhat'] < 0]['yhat'].values}")
+            consumer_forecast_df['yhat'] = consumer_forecast_df['yhat'].clip(lower=0)
         logging.info("Consumer-specific forecast validation passed")
     except AssertionError as e:
         logging.error(f"Validation failed: {e}")
@@ -621,7 +649,6 @@ def main():
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig('lightgbm_system_forecast.png', dpi=300, bbox_inches='tight')
-    plt.close()
     logging.info("System forecast plot saved as 'lightgbm_system_forecast.png'")
 
     plt.figure(figsize=(15, 8))
@@ -636,7 +663,6 @@ def main():
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig('lightgbm_group_forecast.png', dpi=300, bbox_inches='tight')
-    plt.close()
     logging.info("Group forecast plot saved as 'lightgbm_group_forecast.png'")
 
     # Step 11: Save results
