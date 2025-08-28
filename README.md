@@ -89,9 +89,9 @@ Each includes: **rmse, mae, mae/median ratio, features, data points, date range,
 ---
 
 ## 🧩 Features Used
-- **Weather**: `avg_temp` (filled with median if missing).  
+- **Weather**: `avg_temp` (made a separate model to predict future temp).  
 - **Date**: `year, month, day_of_week, day_of_year, week_of_year`.  
-- **Rolling stats**: `rolling_mean_7, rolling_mean_14, rolling_mean_30`.  
+- **Rolling stats**: `rolling_mean_7, rolling_mean_14, rolling_mean_30` (rolling stats updated after each day's prediction - iterative update).  
 - **IDs**: `consumer_id, group`.  
 
 ---
@@ -154,7 +154,7 @@ python forecast_consumption.py
 - **Data Size**:  
   - Input: ~9.4M readings, 11,357 consumers  
   - Processed: ~12.3M daily rows  
-- **Runtime**: ~31 min for 100 days (consumer-level training = bottleneck)  
+- **Runtime**: ~31 mins for 100 days, ~50 mins for one year (consumer-level training = bottleneck)  
 - **Latest Run (2025-08-27)**:  
   - System-wide: RMSE = 0.27, MAE = 0.21 (3.2% error)  
   - Consumer: RMSE = 2.59, MAE = 1.33 (33.2% error)  

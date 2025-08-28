@@ -235,7 +235,7 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
             num_boost_round=2000,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50),
-                lgb.log_evaluation(period=100)
+                lgb.log_evaluation(period=365)
             ]
         )
         
@@ -269,7 +269,7 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
         logging.error(f"Failed to train LightGBM model: {e}")
         raise
 
-def forecast_system_future(model, data, features, periods=100):  # Increased periods to 100 for consistency
+def forecast_system_future(model, data, features, periods=365):
     """Forecast future system-wide consumption for the specified periods."""
     logging.info(f"Forecasting next {periods} days (system-wide)...")
     
@@ -334,7 +334,7 @@ def forecast_system_future(model, data, features, periods=100):  # Increased per
         logging.error(f"Failed to forecast system-wide: {e}")
         raise
 
-def forecast_consumer_future(model, data, features, valid_consumers, periods=100):  # Increased periods to 100
+def forecast_consumer_future(model, data, features, valid_consumers, periods=365):
     """Forecast future consumption for each consumer."""
     logging.info(f"Forecasting next {periods} days (consumer-specific)...")
     
@@ -427,7 +427,7 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
         logging.error(f"Failed to forecast consumer-specific: {e}")
         raise
 
-def forecast_group_future(model, data, features, group_id, periods=100):  # Increased periods to 100
+def forecast_group_future(model, data, features, group_id, periods=365):
     """Forecast future average consumption for a specific group."""
     logging.info(f"Forecasting next {periods} days for group {group_id}...")
     
@@ -691,23 +691,23 @@ def main():
 
     # Step 8: Forecast future consumption
     logging.info("Step 8: Forecasting future consumption (system-wide)...")
-    system_forecast_df = forecast_system_future(system_model, system_wide_data, system_features, periods=100)
+    system_forecast_df = forecast_system_future(system_model, system_wide_data, system_features, periods=365)
     
     logging.info("Step 8: Forecasting future consumption (consumer-specific)...")
-    consumer_forecast_df = forecast_consumer_future(consumer_model, consumer_specific_data, consumer_features, valid_consumers, periods=100)
+    consumer_forecast_df = forecast_consumer_future(consumer_model, consumer_specific_data, consumer_features, valid_consumers, periods=365)
 
     group_forecasts = {}
     for group_id, g_model in group_models.items():
         logging.info(f"Step 8: Forecasting future consumption for group {group_id}...")
-        group_forecasts[group_id] = forecast_group_future(g_model, group_data[group_id], group_features[group_id], group_id, periods=100)
+        group_forecasts[group_id] = forecast_group_future(g_model, group_data[group_id], group_features[group_id], group_id, periods=365)
 
     # Step 9: Validate outputs
     logging.info("Step 9: Validating output forecasts...")
     try:
         assert consumer_forecast_df['consumer_id'].nunique() == len(valid_consumers), \
             f"Expected {len(valid_consumers)} consumers, got {consumer_forecast_df['consumer_id'].nunique()}"
-        assert consumer_forecast_df.shape[0] == len(valid_consumers) * 100, \
-            f"Expected {len(valid_consumers) * 100} rows, got {consumer_forecast_df.shape[0]}"
+        assert consumer_forecast_df.shape[0] == len(valid_consumers) * 365, \
+            f"Expected {len(valid_consumers) * 365} rows, got {consumer_forecast_df.shape[0]}"
         if (consumer_forecast_df['yhat'] < 0).any():
             logging.warning(f"Negative predictions in consumer forecast: {consumer_forecast_df[consumer_forecast_df['yhat'] < 0]['yhat'].values}")
             consumer_forecast_df['yhat'] = consumer_forecast_df['yhat'].clip(lower=0)
