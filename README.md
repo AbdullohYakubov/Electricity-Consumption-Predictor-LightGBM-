@@ -154,7 +154,7 @@ python forecast_consumption.py
 - **Data Size**:  
   - Input: ~9.4M readings, 11,357 consumers  
   - Processed: ~12.3M daily rows  
-- **Runtime**: ~31 min (consumer-level training = bottleneck)  
+- **Runtime**: ~31 min for 100 days (consumer-level training = bottleneck)  
 - **Latest Run (2025-08-27)**:  
   - System-wide: RMSE = 0.27, MAE = 0.21 (3.2% error)  
   - Consumer: RMSE = 2.59, MAE = 1.33 (33.2% error)  

@@ -1,2 +1,0 @@
-group,rmse,mae,mae_median_ratio,features_used,data_points,date_range,params
-0,0.14909488328849338,0.11100015733145667,2.875843820683227,"['avg_temp', 'year', 'month', 'day_of_week', 'day_of_year', 'week_of_year', 'rolling_mean_7', 'rolling_mean_14', 'rolling_mean_30']",1095,2022-01-02 00:00:00 to 2024-12-31 00:00:00,"[{'objective': 'regression', 'metric': 'rmse', 'boosting_type': 'gbdt', 'num_leaves': 31, 'learning_rate': 0.05, 'min_data_in_leaf': 20, 'feature_fraction': 0.9, 'bagging_fraction': 0.8, 'bagging_freq': 5, 'verbose': -1, 'force_col_wise': True}]"

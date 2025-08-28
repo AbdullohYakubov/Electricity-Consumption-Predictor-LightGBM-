@@ -23,6 +23,9 @@ logging.basicConfig(
     ]
 )
 
+future_temps = pd.read_csv('future_temps.csv')
+future_temps['ds'] = pd.to_datetime(future_temps['ds'])
+
 # ------------------ Data Preparation Functions ------------------
 def prepare_all_daily_consumption(df_readings):
     """Calculate daily consumption for all consumers, handling negative consumptions."""
@@ -266,7 +269,7 @@ def train_lightgbm_model(data, test_size=0.2, params=None):
         logging.error(f"Failed to train LightGBM model: {e}")
         raise
 
-def forecast_system_future(model, data, features, periods=100):
+def forecast_system_future(model, data, features, periods=100):  # Increased periods to 100 for consistency
     """Forecast future system-wide consumption for the specified periods."""
     logging.info(f"Forecasting next {periods} days (system-wide)...")
     
@@ -274,21 +277,48 @@ def forecast_system_future(model, data, features, periods=100):
         last_date = data['ds'].max()
         future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=periods, freq='D')
         
-        future_data = pd.DataFrame({'ds': future_dates})
-        future_data['year'] = future_data['ds'].dt.year
-        future_data['month'] = future_data['ds'].dt.month
-        future_data['day_of_week'] = future_data['ds'].dt.dayofweek
-        future_data['day_of_year'] = future_data['ds'].dt.dayofyear
-        future_data['week_of_year'] = future_data['ds'].dt.isocalendar().week
-        
+        # Merge with forecasted temperatures
+        future_data = pd.DataFrame({
+            'ds': future_dates,
+            'year': future_dates.year,  # Use .year directly on DatetimeIndex
+            'month': future_dates.month,  # Use .month directly
+            'day_of_week': future_dates.dayofweek,  # Use .dayofweek directly
+            'day_of_year': future_dates.dayofyear,  # Use .dayofyear directly
+            'week_of_year': future_dates.isocalendar().week  # Use .isocalendar().week directly
+        })
+        future_data = future_data.merge(future_temps, on='ds', how='left')
+        future_data['avg_temp'] = future_data['avg_temp'].fillna(future_data['avg_temp'].mean())  # Fallback
+
+        # Initialize rolling means with last historical values
         last_row = data.iloc[-1]
-        for feature in features:
-            if feature not in ['year', 'month', 'day_of_week', 'day_of_year', 'week_of_year']:
-                future_data[feature] = last_row[feature]
-        
-        X_future = future_data[features]
-        future_predictions = model.predict(X_future)
-        
+        future_predictions = np.zeros(periods)
+        last_7 = list(data['y'].tail(7))
+        last_14 = list(data['y'].tail(14))
+        last_30 = list(data['y'].tail(30))
+
+        # Iterative forecasting
+        for i, date in enumerate(future_dates):
+            row = {
+                'ds': date,
+                'year': date.year,
+                'month': date.month,
+                'day_of_week': date.dayofweek,
+                'day_of_year': date.dayofyear,
+                'week_of_year': date.isocalendar().week,
+                'avg_temp': future_data.loc[future_data['ds'] == date, 'avg_temp'].values[0],
+                'rolling_mean_7': np.mean(last_7) if last_7 else 0,
+                'rolling_mean_14': np.mean(last_14) if last_14 else 0,
+                'rolling_mean_30': np.mean(last_30) if last_30 else 0
+            }
+            X_future = pd.DataFrame([row])[features]
+            pred = model.predict(X_future)[0]
+            future_predictions[i] = pred
+
+            # Update rolling means
+            last_7.append(pred); last_7 = last_7[-7:]
+            last_14.append(pred); last_14 = last_14[-14:]
+            last_30.append(pred); last_30 = last_30[-30:]
+
         # Validate predictions
         if (future_predictions < 0).any():
             logging.warning(f"Negative predictions detected in system-wide forecast: {future_predictions[future_predictions < 0]}")
@@ -304,7 +334,7 @@ def forecast_system_future(model, data, features, periods=100):
         logging.error(f"Failed to forecast system-wide: {e}")
         raise
 
-def forecast_consumer_future(model, data, features, valid_consumers, periods=100):
+def forecast_consumer_future(model, data, features, valid_consumers, periods=100):  # Increased periods to 100
     """Forecast future consumption for each consumer."""
     logging.info(f"Forecasting next {periods} days (consumer-specific)...")
     
@@ -314,8 +344,8 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
         
         future_data = []
         for consumer_id in valid_consumers:
-            consumer_data = data[data['consumer_id'] == consumer_id]
-            if consumer_data.empty:
+            consumer_history = data[data['consumer_id'] == consumer_id]
+            if consumer_history.empty:
                 logging.warning(f"No valid data for consumer {consumer_id}, assigning zero forecast")
                 for date in future_dates:
                     row = {
@@ -326,47 +356,70 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
                         'month': date.month,
                         'day_of_week': date.dayofweek,
                         'day_of_year': date.dayofyear,
-                        'week_of_year': date.isocalendar().week,
-                        'avg_temp': data['avg_temp'].median() if not data.empty else 20.0,
-                        'rolling_mean_7': 0.0,
-                        'rolling_mean_14': 0.0,
-                        'rolling_mean_30': 0.0
+                        'week_of_year': date.isocalendar().week
                     }
                     future_data.append(row)
             else:
-                consumer_data = consumer_data.iloc[-1]
+                last_row = consumer_history.iloc[-1]
+                # Initialize rolling means
+                last_7 = list(consumer_history['y'].tail(7)) if not consumer_history.empty else [0]*7
+                last_14 = list(consumer_history['y'].tail(14)) if not consumer_history.empty else [0]*14
+                last_30 = list(consumer_history['y'].tail(30)) if not consumer_history.empty else [0]*30
+
                 for date in future_dates:
+                    # Merge with future temperatures
+                    temp_value = future_temps.loc[future_temps['ds'] == date, 'avg_temp'].values
+                    avg_temp = temp_value[0] if len(temp_value) > 0 else last_row['avg_temp']
                     row = {
                         'ds': date,
                         'consumer_id': consumer_id,
-                        'group': consumer_data['group'],
+                        'group': last_row['group'],
                         'year': date.year,
                         'month': date.month,
                         'day_of_week': date.dayofweek,
                         'day_of_year': date.dayofyear,
                         'week_of_year': date.isocalendar().week,
-                        'avg_temp': consumer_data['avg_temp'],
-                        'rolling_mean_7': consumer_data['rolling_mean_7'],
-                        'rolling_mean_14': consumer_data['rolling_mean_14'],
-                        'rolling_mean_30': consumer_data['rolling_mean_30']
+                        'avg_temp': avg_temp,
+                        'rolling_mean_7': np.mean(last_7) if last_7 else 0,
+                        'rolling_mean_14': np.mean(last_14) if last_14 else 0,
+                        'rolling_mean_30': np.mean(last_30) if last_30 else 0
                     }
                     future_data.append(row)
-        
+
         future_data = pd.DataFrame(future_data)
         X_future = future_data[features]
         future_predictions = model.predict(X_future)
-        
+
+        # Update rolling means iteratively after all predictions
+        updated_predictions = np.zeros(len(future_dates) * len(valid_consumers))
+        start_idx = 0
+        for consumer_idx, consumer_id in enumerate(valid_consumers):
+            consumer_start_idx = consumer_idx * len(future_dates)
+            consumer_end_idx = (consumer_idx + 1) * len(future_dates)
+            consumer_preds = future_predictions[consumer_start_idx:consumer_end_idx]
+            
+            consumer_history = data[data['consumer_id'] == consumer_id]
+            last_7 = list(consumer_history['y'].tail(7)) if not consumer_history.empty else [0]*7
+            last_14 = list(consumer_history['y'].tail(14)) if not consumer_history.empty else [0]*14
+            last_30 = list(consumer_history['y'].tail(30)) if not consumer_history.empty else [0]*30
+
+            for i, pred in enumerate(consumer_preds):
+                updated_predictions[consumer_start_idx + i] = pred
+                if i < len(future_dates) - 1:  # Update for next iteration within consumer
+                    last_7.append(pred); last_7 = last_7[-7:]
+                    last_14.append(pred); last_14 = last_14[-14:]
+                    last_30.append(pred); last_30 = last_30[-30:]
+
         # Validate predictions
-        if (future_predictions < 0).any():
-            logging.warning(f"Negative predictions detected in consumer-specific forecast: {future_predictions[future_predictions < 0]}")
-            logging.warning(f"Negative predictions detected in consumer-specific forecast: ")
-            future_predictions = np.clip(future_predictions, 0, None)
+        if (updated_predictions < 0).any():
+            logging.warning(f"Negative predictions detected in consumer-specific forecast: {updated_predictions[updated_predictions < 0]}")
+            updated_predictions = np.clip(updated_predictions, 0, None)
         
         forecast_df = pd.DataFrame({
             'ds': future_data['ds'],
             'consumer_id': future_data['consumer_id'],
             'group': future_data['group'],
-            'yhat': future_predictions
+            'yhat': updated_predictions
         })
         
         return forecast_df
@@ -374,7 +427,7 @@ def forecast_consumer_future(model, data, features, valid_consumers, periods=100
         logging.error(f"Failed to forecast consumer-specific: {e}")
         raise
 
-def forecast_group_future(model, data, features, group_id, periods=100):
+def forecast_group_future(model, data, features, group_id, periods=100):  # Increased periods to 100
     """Forecast future average consumption for a specific group."""
     logging.info(f"Forecasting next {periods} days for group {group_id}...")
     
@@ -382,21 +435,48 @@ def forecast_group_future(model, data, features, group_id, periods=100):
         last_date = data['ds'].max()
         future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=periods, freq='D')
         
-        future_data = pd.DataFrame({'ds': future_dates})
-        future_data['year'] = future_data['ds'].dt.year
-        future_data['month'] = future_data['ds'].dt.month
-        future_data['day_of_week'] = future_data['ds'].dt.dayofweek
-        future_data['day_of_year'] = future_data['ds'].dt.dayofyear
-        future_data['week_of_year'] = future_data['ds'].dt.isocalendar().week
-        
+        # Merge with forecasted temperatures
+        future_data = pd.DataFrame({
+            'ds': future_dates,
+            'year': future_dates.year,  # Use .year directly on DatetimeIndex
+            'month': future_dates.month,  # Use .month directly
+            'day_of_week': future_dates.dayofweek,  # Use .dayofweek directly
+            'day_of_year': future_dates.dayofyear,  # Use .dayofyear directly
+            'week_of_year': future_dates.isocalendar().week  # Use .isocalendar().week directly
+        })
+        future_data = future_data.merge(future_temps, on='ds', how='left')
+        future_data['avg_temp'] = future_data['avg_temp'].fillna(future_data['avg_temp'].mean())  # Fallback
+
+        # Initialize rolling means with last historical values
         last_row = data.iloc[-1]
-        for feature in features:
-            if feature not in ['year', 'month', 'day_of_week', 'day_of_year', 'week_of_year']:
-                future_data[feature] = last_row[feature]
-        
-        X_future = future_data[features]
-        future_predictions = model.predict(X_future)
-        
+        future_predictions = np.zeros(periods)
+        last_7 = list(data['y'].tail(7))
+        last_14 = list(data['y'].tail(14))
+        last_30 = list(data['y'].tail(30))
+
+        # Iterative forecasting
+        for i, date in enumerate(future_dates):
+            row = {
+                'ds': date,
+                'year': date.year,
+                'month': date.month,
+                'day_of_week': date.dayofweek,
+                'day_of_year': date.dayofyear,
+                'week_of_year': date.isocalendar().week,
+                'avg_temp': future_data.loc[future_data['ds'] == date, 'avg_temp'].values[0],
+                'rolling_mean_7': np.mean(last_7) if last_7 else 0,
+                'rolling_mean_14': np.mean(last_14) if last_14 else 0,
+                'rolling_mean_30': np.mean(last_30) if last_30 else 0
+            }
+            X_future = pd.DataFrame([row])[features]
+            pred = model.predict(X_future)[0]
+            future_predictions[i] = pred
+
+            # Update rolling means
+            last_7.append(pred); last_7 = last_7[-7:]
+            last_14.append(pred); last_14 = last_14[-14:]
+            last_30.append(pred); last_30 = last_30[-30:]
+
         # Validate predictions
         if (future_predictions < 0).any():
             logging.warning(f"Negative predictions detected in group {group_id} forecast: {future_predictions[future_predictions < 0]}")
@@ -520,6 +600,11 @@ def main():
     except Exception as e:
         logging.error(f"Failed to load reading files: {e}")
         raise
+
+    # Select a small fraction (first 100 unique consumers) for testing
+    # unique_consumers = df_readings['consumer_id'].unique()[:100]
+    # df_readings = df_readings[df_readings['consumer_id'].isin(unique_consumers)]
+    # logging.info(f"Selected {len(unique_consumers)} unique consumers for testing.")
 
     # Filter consumers with sufficient data
     min_days = 365
