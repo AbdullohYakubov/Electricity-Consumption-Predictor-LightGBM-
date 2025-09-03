@@ -7,7 +7,7 @@ This repository contains **`forecast_consumption.py`**, a forecasting pipeline u
 - **Consumer-specific** – Daily consumption for individual consumers.  
 - **Group-specific** – Average daily consumption for consumer clusters (low, medium, high).  
 
-The pipeline processes **meter readings** and **temperature data**, generates **100-day forecasts**, and clusters consumers into **3 groups** based on average daily consumption.  
+The pipeline processes **meter readings** and **temperature data**, generates **365-day forecasts**, and clusters consumers into **3 groups** based on average daily consumption.  
 
 ---
 
@@ -54,7 +54,7 @@ The pipeline processes **meter readings** and **temperature data**, generates **
 ### 📑 Forecast Files
 - **System-wide**: `lightgbm_system_forecast.csv`  
 - **Consumer-specific**:  
-  - `lightgbm_consumer_forecast.csv` – All consumers, 100 days  
+  - `lightgbm_consumer_forecast.csv` – All consumers, 365 days  
   - `lightgbm_consumer_avg_forecast.csv` – Consumer average  
 - **Group-specific**: `lightgbm_group_{0,1,2}_forecast.csv`  
 
@@ -117,7 +117,7 @@ Each includes: **rmse, mae, mae/median ratio, features, data points, date range,
 
 ## 📌 Assumptions
 - Meter readings in Wh (converted to kWh).  
-- Forecast horizon: **100 days** after last known date.  
+- Forecast horizon: **365 days** after last known date.  
 - Consumers with <365 days excluded.  
 - Clustering via **KMeans (3 groups, random_state=42)**.  
 - Missing values filled via median (temperature, rolling means).  
@@ -154,7 +154,7 @@ python forecast_consumption.py
 - **Data Size**:  
   - Input: ~9.4M readings, 11,357 consumers  
   - Processed: ~12.3M daily rows  
-- **Runtime**: ~31 mins for 100 days, ~50 mins for one year (consumer-level training = bottleneck)  
+- **Runtime**: ~31 mins for 100 days, ~50 mins for 1 year (consumer-level training = bottleneck)  
 - **Latest Run (2025-08-27)**:  
   - System-wide: RMSE = 0.27, MAE = 0.21 (3.2% error)  
   - Consumer: RMSE = 2.59, MAE = 1.33 (33.2% error)  
@@ -167,7 +167,7 @@ python forecast_consumption.py
 ## 🚀 Key Improvements
 - ✅ **Non-Negative Predictions** via Tweedie objective.  
 - ✅ **Data Quality Handling**: Negative readings interpolated, outliers removed.  
-- ✅ **Robust Validation**: All 11,357 consumers validated across 100 days.  
+- ✅ **Robust Validation**: All 11,357 consumers validated across 365 days.  
 
 ---
 
